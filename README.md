@@ -1,0 +1,2 @@
+# MinderDB
+Miner package database
