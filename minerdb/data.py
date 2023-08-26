@@ -8,11 +8,10 @@ import contextlib, enum, pathlib, typing
 from sqlalchemy import (
     create_engine, insert, select, update, func, Engine, Insert, Select, Update)
 from sqlalchemy import Boolean, Enum, ForeignKey, Integer, String
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from error import RecordExists, RecordNotFound
+from minerdb.error import RecordExists, RecordNotFound
 
 T = typing.TypeVar("T")
 
