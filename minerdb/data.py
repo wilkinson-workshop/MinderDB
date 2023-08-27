@@ -150,8 +150,8 @@ def version_parse_str(version: str) -> tuple[int, int, int]:
     return tuple(ret)
 
 
-class Service(enum.StrEnum):
-    """Type of service."""
+class ServiceAPI(enum.StrEnum):
+    """Type of service API."""
 
     Bukkit   = enum.auto()
     Paper    = enum.auto()
@@ -276,11 +276,11 @@ class Resource(MinerModelV1):
 
     __tablename__ = "resources"
 
-    id:   Mapped[int]     = mapped_column(primary_key=True)
-    name: Mapped[str]     = mapped_column(String(64))
-    type: Mapped[Service] = mapped_column(
-        Enum(Service),
-        default=Service.Paper)
+    id:   Mapped[int]        = mapped_column(primary_key=True)
+    name: Mapped[str]        = mapped_column(String(64))
+    type: Mapped[ServiceAPI] = mapped_column(
+        Enum(ServiceAPI),
+        default=ServiceAPI.Paper)
     kind: Mapped[ResourceKind] = mapped_column(
         Enum(ResourceKind),
         default=ResourceKind.Plugin)
@@ -516,7 +516,7 @@ class MinerDB_V1(MinerDBSimple):
         self,
         resource: int | None = None,
         name: str | None = None,
-        type: Service | None = None,
+        type: ServiceAPI | None = None,
         kind: ResourceKind | None = None) -> DataResponse[Resource]:
         """
         Query database for instances of
@@ -562,76 +562,131 @@ class MinerDB_V1(MinerDBSimple):
 
         return data_find(self.count(stmt), self.find(stmt))
 
-    def push_host(self, host: dict[str, str]) -> DataResponse:
-        """
-        Creates a new, or updates an existing,
-        host.
-        """
+    def make_host(self, meta: dict[str, str]) -> DataResponse:
+        """Create a new host entry."""
 
-        model = Host(**host)
-        found = validate_pre_update(model, self.find_hosts, **host)
-        count = found["count"]
-
+        model, count = self.prevalidate_host(meta)
         if count == 1:
-            stmt = (self.update(Host)
-                .values(host=model.host)
-                .where(Host.name == model.name))
-        else:
-            stmt = (self.create(Host)
-                .values(host=model.host, name=model.name))
-        self.push(stmt, commit=True)
+            raise RecordExists("Host exists.")
 
+        self.push(
+            self.create(Host)
+                .values(host=model.host, name=model.name),
+            commit=True)
+    
         return data_push(count)
 
-    def push_minecraft(self, version: dict[str, str]) -> DataResponse:
-        """Create a new Minecraft metadata."""
+    def make_minecraft(self, meta: dict[str, str]) -> DataResponse:
+        """Create a new Minecraft entry."""
 
-        maj, min, pat = version_parse_str(version["version"])
-        model = MinecraftVersion(major=maj, minor=min, patch=pat)
-
-        found = validate_pre_update(
-            version,
-            self.find_minecraft,
-            version["version"])
-        count = found["count"]
-
+        model, count = self.prevalidate_minecraft(meta)
         if count == 1:
-            # Precheck only validates for if an
-            # existing record matches this one.
-            raise RecordExists("Record exists.")
-        else:
-            stmt = (self.create(MinecraftVersion)
+            raise RecordExists("Minecraft exists.")
+
+        self.push(
+            self.create(MinecraftVersion)
                 .values(
                     major=model.major,
                     minor=model.minor,
-                    patch=model.patch))
-        self.push(stmt, commit=True)
+                    patch=model.patch),
+            commit=True)
 
         return data_push(count)
 
-    def push_resource(self, resource: dict[str, str]) -> DataResponse:
-        """
-        Creates a new, or updates an existing,
-        resource.
-        """
+    def make_resource(self, meta: dict[str, str]) -> DataResponse:
+        """Create a new resource entry."""
 
-        model = Resource(**resource)
-        found = validate_pre_update(model, self.find_resources, **resource)
-        count = found["count"]
-
+        model, count = self.prevalidate_resource(meta)
         if count == 1:
-            stmt = (self.update(Resource)
-                .values(
-                    type=model.type,
-                    kind=model.kind)
-                .where(Resource.name == model.name))
-        else:
-            stmt = (self.create(Resource)
+            raise RecordExists("Resource exists.")
+
+        self.push(
+            self.create(Resource)
                 .values(
                     name=model.name,
                     type=model.type,
-                    kind=model.kind))
-        self.push(stmt, commit=True)
+                    kind=model.kind),
+                commit=True)
+
+        return data_push(count)
+
+    def prevalidate_host(self, meta: dict[str, str]) -> tuple[Host, int]:
+        """
+        Validate a host entry before it can be
+        modified or created. Raises a
+        `MinerException` if invalid, returns a
+        query model and the result count
+        otherwise.
+        """
+
+        model = Host(**meta)
+        found = validate_pre_update(model, self.find_hosts, **meta)
+        return model, found["count"]
+    
+    def prevalidate_minecraft(
+        self,
+        meta: dict[str, str]) -> tuple[MinecraftVersion, int]:
+        """
+        Validate a Minecraft entry before it can
+        be modified or created. Raises a
+        `MinerException` if invalid, returns a
+        query model and the result count
+        otherwise.
+        """ 
+
+        found = validate_pre_update(meta, self.find_minecraft, meta["version"])
+        count = found["count"]
+
+        maj, min, pat = version_parse_str(meta["version"])
+        return MinecraftVersion(major=maj, minor=min, patch=pat), count
+
+    def prevalidate_resource(
+        self,
+        meta: dict[str, str]) -> tuple[Resource, int]:
+        """
+        Validate a resource entry before it can
+        be modified or created. Raises a
+        `MinerException` if invalid, returns a
+        query model and the result count
+        otherwise.
+        """
+
+        model = Resource(**meta)
+        found = validate_pre_update(model, self.find_resources, **meta)
+        return model, found["count"]
+
+
+    def push_host(self, host: dict[str, str]) -> DataResponse:
+        """
+        Update an existing host entry.
+        """
+
+        model, count = self.prevalidate_host(host)
+        if count < 1:
+            raise RecordNotFound("Host not found.")
+
+        self.push(
+            self.update(Host)
+                .values(host=model.host)
+                .where(Host.name == model.name),
+            commit=True)
+        
+        return data_push(count)
+
+    def push_resource(self, meta: dict[str, str]) -> DataResponse:
+        """
+        Update an existing resource.
+        """
+
+        model, count = self.prevalidate_resource(meta)
+
+        self.push(
+            self.update(Resource)
+                .values(
+                    type=model.type,
+                    kind=model.kind)
+                .where(Resource.name == model.name),
+            commit=True)
 
         return data_push(count)
 

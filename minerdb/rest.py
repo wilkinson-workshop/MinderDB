@@ -6,7 +6,7 @@ from fastapi import FastAPI, APIRouter
 from fastapi.exceptions import HTTPException
 from fastapi.types import DecoratedCallable
 
-from minerdb.data import MDt, Service, MinerDB_V1, ResourceKind
+from minerdb.data import MDt, ServiceAPI, MinerDB_V1, ResourceKind
 from minerdb.error import MinerException
 
 Tt = typing.TypeVar("Tt")
@@ -148,8 +148,9 @@ class RESTMethod(typing.Protocol, MethodCallable[Tt, Ps, Rt]):
         **kwds):
         """Wraps a callable as a `RestMethod`"""
 
-        kwds["name"] = kwds.get("name", fn.__name__)
+        kwds["description"] = kwds.get("description", fn.__doc__)
         kwds["methods"] = kwds.get("methods", [method])
+        kwds["name"] = kwds.get("name", fn.__name__)
 
         self.__is_restmethod__   = True
         self.__restmethod_meta__ = (method, path, kwds)
@@ -291,7 +292,7 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
         Returns all available resource aliases.
         """
 
-        return self.data.find_aliases(name=name)
+        return self.data.find_aliases(name)
 
     @restmethod("GET", "/host")
     @minerdb_exc_handler
@@ -300,7 +301,7 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
         Returns all hosts that match a name.
         """
 
-        return self.data.find_hosts(name=name)
+        return self.data.find_hosts(name)
 
     @restmethod("GET", "/minecraft")
     @minerdb_exc_handler
@@ -311,10 +312,15 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
 
     @restmethod("GET", "/resource")
     @minerdb_exc_handler
-    async def read_resources(self):
+    async def read_resources(
+        self,
+        id: typing.Optional[int] = None,
+        name: typing.Optional[str] = None,
+        type: typing.Optional[ServiceAPI] = None,
+        kind: typing.Optional[ResourceKind] = None):
         """Returns all available resources."""
 
-        return self.data.find_resources()
+        return self.data.find_resources(id, name, type, kind)
 
     @restmethod("GET", "/version")
     @minerdb_exc_handler
@@ -328,13 +334,13 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
         """Returns all available versions."""
 
         return self.data.find_versions(
-            resource=resource,
-            version=version,
-            build=build,
-            compatibility=compatibility,
-            is_snapshot=is_snapshot)
+            resource,
+            version,
+            build,
+            compatibility,
+            is_snapshot)
 
-    @restmethod("PUT", "/host", status_code=201)
+    @restmethod("PATCH", "/host", status_code=201)
     @minerdb_exc_handler
     async def push_host(self, name: str, host: typing.Optional[str] = None):
         """
@@ -344,16 +350,19 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
 
         return self.data.push_host(dict(name=name, host=host))
 
-    @restmethod("PUT", "/minecraft", status_code=201)
+    @restmethod("POST", "/minecraft", status_code=201)
     @minerdb_exc_handler
     async def push_minecraft(self, version: str):
         """Creates a new Minecraft metadata."""
 
-        return self.data.push_minecraft(dict(version=version))
+        return self.data.make_minecraft(dict(version=version))
 
-    @restmethod("PUT", "/resource", status_code=201)
+    @restmethod("PATCH", "/resource", status_code=201)
     @minerdb_exc_handler
-    async def push_resource(self, name: str, type: Service, kind: ResourceKind):
+    async def push_resource(
+        self,
+        name: str,
+        type: ServiceAPI, kind: ResourceKind):
         """
         Creates a new, or updates an existing,
         host.
