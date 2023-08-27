@@ -1,6 +1,6 @@
 """Defines Web APIs."""
 
-import abc, contextlib, functools, typing
+import abc, contextlib, functools, inspect, typing
 
 from fastapi import FastAPI, APIRouter
 from fastapi.exceptions import HTTPException
@@ -9,24 +9,39 @@ from fastapi.types import DecoratedCallable
 from minerdb.data import MinerDB, MinerDB_V1
 from minerdb.error import MinerException
 
-T = typing.TypeVar("T")
-R = typing.TypeVar("R", covariant=True)
-P = typing.ParamSpec("P")
+Tt = typing.TypeVar("Tt")
+Rt = typing.TypeVar("Rt", covariant=True)
+Ps = typing.ParamSpec("Ps")
 DCWrapper = typing.Callable[[DecoratedCallable], DecoratedCallable]
-MethodCallable = typing.Callable[typing.Concatenate[T, P], R]
+MethodCallable = typing.Callable[typing.Concatenate[Tt, Ps], Rt]
 
 
-@contextlib.contextmanager
-def minerdb_exc_handler():
+def minerdb_exc_handler(fn: DecoratedCallable) -> DecoratedCallable:
     """
     Opens a context to handle `MinerException`s
     and raise them as `HTTPException`s.
     """
 
-    try:
-        yield
-    except MinerException as exc:
-        raise HTTPException(exc.status_code or 500, exc.message) from exc
+    @contextlib.contextmanager
+    def inner_context():
+        try:
+            yield
+        except MinerException as exc:
+            raise HTTPException(exc.status_code or 500, exc.message) from exc
+
+    def inner(*args, **kwds):
+        with inner_context():
+            return fn(*args, **kwds)
+
+    async def ainner(*args, **kwds):
+        with inner_context():
+            return await fn(*args, **kwds)
+
+    wrapper = inner
+    if inspect.iscoroutinefunction(fn):
+        wrapper = ainner
+
+    return functools.update_wrapper(wrapper, fn)
 
 
 def isdunder(name: str) -> bool:
@@ -90,7 +105,7 @@ def restmethod(method: str, path: str, **kwds) -> DCWrapper:
 
 
 @typing.runtime_checkable
-class RESTMethod(typing.Protocol, MethodCallable[T, P, R]):
+class RESTMethod(typing.Protocol, MethodCallable[Tt, Ps, Rt]):
     """
     Method protocol for wrapped callables that
     are registered as REST implementations.
@@ -98,13 +113,7 @@ class RESTMethod(typing.Protocol, MethodCallable[T, P, R]):
 
     __is_restmethod__:   bool
     __restmethod_meta__: tuple[str, str, typing.Mapping]
-    __wrapped__:         MethodCallable[T, P, R]
-
-    @property
-    def wrapped(self) -> MethodCallable[T, P, R]:
-        """Wrapped REST implementation."""
-
-        return self.__wrapped__
+    __wrapped__:         MethodCallable[Tt, Ps, Rt]
 
     @property
     def method(self) -> str:
@@ -124,9 +133,16 @@ class RESTMethod(typing.Protocol, MethodCallable[T, P, R]):
     
         return self.__restmethod_meta__[1]
 
+    def wrapped(self, owner: typing.Any = None) -> MethodCallable[Tt, Ps, Rt]:
+        """Wrapped REST implementation."""
+
+        if owner:
+            return functools.partial(self.__wrapped__, owner)
+        return self.__wrapped__
+
     def __init__(
         self,
-        fn: MethodCallable[T, P, R],
+        fn: MethodCallable[Tt, Ps, Rt],
         method: str,
         path: str, 
         **kwds):
@@ -139,7 +155,7 @@ class RESTMethod(typing.Protocol, MethodCallable[T, P, R]):
         self.__restmethod_meta__ = (method, path, kwds)
         self.__wrapped__         = fn
 
-    def __call__(self, owner, *args, **kwds) -> R:
+    def __call__(self, owner, *args, **kwds) -> Rt:
         return self.wrapped(owner, *args, **kwds)
 
 
@@ -241,21 +257,26 @@ class MinerAPI(typing.Protocol, metaclass=MinerAPI_Meta):
 
     def __init__(self, **kwds):
         """Initialize this API implementation."""
+        kwds["title"] = kwds.get("title", "MinerDB")
+
         self.__data__ = self.__data_class__(debug=self.__debug_mode__)
         self.__rest__ = self.__rest_class__(debug=self.__debug_mode__, **kwds)
 
+        route: RESTMethod
         for name in self.routes:
             route = getattr(self, name)
-
-            func = functools.partial(route.wrapped, self)
-            args = route.path, func
+            args  = route.path, route.wrapped(self)
             self.router.add_api_route(*args, **route.options)
 
         self.rest.include_router(self.router)
+        self.data.init()
 
 
 class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
     """MinerDB API Version: 1"""
+
+    if typing.TYPE_CHECKING:
+        data: MinerDB_V1
 
     @restmethod("GET", "/")
     async def read_root(self):
@@ -263,53 +284,76 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
 
         return {"status": "OK", "version": 1}
 
-    @restmethod("GET", "/aliases")
-    def read_aliases_all(self):
+    @restmethod("GET", "/alias")
+    @minerdb_exc_handler
+    async def read_aliases(self, name: typing.Optional[str] = None):
         """
         Returns all available resource aliases.
         """
 
-        return self.data.find_aliases()
-    
-    @restmethod("GET", "/aliases/{name}")
-    def read_aliases_one(self, name: str):
-        """
-        Returns all aliases that match a name.
-        """
-
         return self.data.find_aliases(name=name)
 
-    @restmethod("GET", "/hosts")
-    async def read_hosts_all(self):
-        """
-        Returns all available resource hosts.
-        """
-
-        return self.data.find_hosts()
-
-    @restmethod("GET", "/hosts/{name}")
-    async def read_hosts_one(self, name: str):
+    @restmethod("GET", "/host")
+    @minerdb_exc_handler
+    async def read_hosts(self, name: typing.Optional[str] = None):
         """
         Returns all hosts that match a name.
         """
 
         return self.data.find_hosts(name=name)
 
-    @restmethod("GET", "/resources/")
-    async def read_resource_all(self):
+    @restmethod("GET", "/minecraft")
+    @minerdb_exc_handler
+    async def read_minecraft(self, version: typing.Optional[str] = None):
+        """Returns all minecraft metadata."""
+
+        return self.data.find_minecraft(version=version)
+
+    @restmethod("GET", "/resource")
+    @minerdb_exc_handler
+    async def read_resources(self):
         """Returns all available resources."""
 
         return self.data.find_resources()
 
-    @restmethod("PUT", "/host/{name}", status_code=201)
-    async def push_hosts_one(self, name: str, host: str):
+    @restmethod("GET", "/version")
+    @minerdb_exc_handler
+    async def read_versions(
+        self,
+        resource: int | None = None,
+        version: str | None = None,
+        build: str | None = None,
+        compatibility: str | None = None,
+        is_snapshot: bool | None = None) :
+        """Returns all available versions."""
+
+        return self.data.find_versions(
+            resource=resource,
+            version=version,
+            build=build,
+            compatibility=compatibility,
+            is_snapshot=is_snapshot)
+
+    @restmethod("PUT", "/host", status_code=201)
+    @minerdb_exc_handler
+    async def push_host(
+        self,
+        name: typing.Optional[str] = None,
+        host: typing.Optional[str] = None):
         """
         Creates a new, or updates an existing,
         host.
         """
 
-        with minerdb_exc_handler():
-            self.data.push_hosts_multi(dict(name=name, host=host))
+        return self.data.push_host(dict(name=name, host=host))
 
+    @restmethod("PUT", "/minecraft", status_code=201)
+    @minerdb_exc_handler
+    async def push_minecraft(
+        self,
+        version: typing.Optional[str] = None):
+        """Creates a new Minecraft metadata."""
+
+        self.data.push_minecraft(dict(version=version))
 
 minerdb = MinerAPI_V1().rest

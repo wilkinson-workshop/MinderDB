@@ -3,17 +3,77 @@ Defined here are ORM Miner models using
 SQLAlchemy.
 """
 
-import contextlib, enum, pathlib, typing
+import contextlib, enum, typing
 
 from sqlalchemy import (
-    create_engine, insert, select, update, func, Engine, Insert, Select, Update)
-from sqlalchemy import Boolean, Enum, ForeignKey, Integer, String
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+    create_engine,
+    delete,
+    insert,
+    select,
+    update,
+    func,
+    Delete,
+    Engine,
+    Insert,
+    Select,
+    Update)
+from sqlalchemy import (
+    Boolean,
+    Enum,
+    ForeignKey,
+    Integer,
+    String)
+from sqlalchemy.orm import (
+    declared_attr,
+    mapped_column,
+    relationship,
+    DeclarativeBase,
+    Mapped,
+    Session)
 
 from minerdb.error import RecordExists, RecordNotFound
 
-T = typing.TypeVar("T")
+Tt         = typing.TypeVar("Tt")
+Ps         = typing.ParamSpec("Ps")
+MMt        = typing.TypeVar("MMt", bound="MinerModelV1")
+StmtT      = typing.TypeVar("StmtT", Select, Update, Insert, Delete)
+DRCallable = typing.Callable[Ps, "DataResponse[MMt]"]
+
+OperationMap = {
+    "==": "__eq__",
+    ">=": "__ge__",
+    "<=": "__le__",
+    ">":  "__gt__",
+    "<":  "__lt__"
+}
+
+def data_find(
+    count: typing.Optional[int] = None,
+    result: typing.Optional[typing.Iterable] = None) -> "DataResponse":
+    """Create a data response for a FIND call."""
+
+    status = DataStatus.FOUND if count else DataStatus.FOUND_NONE
+    return data_new(count, result, status)
+
+
+def data_push(count: typing.Optional[int] = None) -> "DataResponse":
+    """Create a data response for a PUSH call."""
+
+    status = DataStatus.UPDATED if count else DataStatus.CREATED
+    return data_new(count, status=status)
+
+
+def data_new(
+    count: typing.Optional[int] = None,
+    result: typing.Optional[typing.Iterable] = None,
+    status: typing.Optional["DataStatus"] = None) -> "DataResponse":
+    """Create a data response."""
+
+    count  = count or 0
+    result = result or iter(())
+    status = status or DataStatus.OK
+
+    return DataResponse(count=count, result=result, status=status)
 
 
 def resource_repr(
@@ -27,6 +87,66 @@ def resource_repr(
     name   = resource.__class__.__qualname__
     fnames = ", ".join((f"{k}={v!r}" for k,v in fields.items()))
     return f"{name}(" + fnames + ")"
+
+
+def version_compare(
+    stmt: StmtT,
+    model: "HasVersionOrders",
+    version: str) -> StmtT:
+    """
+    Returms a modified version of the original
+    statement to include a version comparison.
+    """
+
+    op, vers = "__eq__", version
+    if vers[:2] in ("==", ">=", "<="):
+        op, vers = OperationMap[vers[:2]], vers[2:]
+    elif version[:1] in (">", "<"):
+        op, vers = OperationMap[vers[:1]], vers[1:]
+
+    parts  = version_parse_str(vers)
+    orders = (model.major, model.minor, model.patch)
+    for order, part in zip(orders, parts):
+        cmp = order.__ge__
+        if part >= 0:
+            cmp = getattr(order, op)
+        stmt = stmt.where(cmp(part))
+
+    return stmt
+
+
+def validate_pre_update(
+    model: MMt,
+    func: DRCallable[MMt], #type: ignore
+    **kwds) -> "DataResponse[MMt]":
+    """
+    Check results to ensure an update call will
+    not interfere with data integrity.
+    """
+
+    found  = func(**kwds)
+    count  = found["count"]
+    result = found["result"]
+
+    if count > 1:
+        raise RecordExists(f"found too many records.")
+    if count > 0 and next(result) == model:
+        raise RecordExists(f"record exists.")
+
+    return found
+
+
+def version_parse_str(version: str) -> tuple[int, int, int]:
+    """
+    Parse a a version string into a 3 integer
+    tuple.
+    """
+
+    parts = list(map(int, version.split(".", maxsplit=3)))
+    ret   = [-1, -1, -1]
+    for idx, part in enumerate(parts):
+        ret[idx] = part
+    return tuple(ret)
 
 
 class Service(enum.StrEnum):
@@ -47,12 +167,21 @@ class ResourceKind(enum.StrEnum):
     Server    = enum.auto()
 
 
-class DataResponse(typing.TypedDict, typing.Generic[T]):
+class DataResponse(typing.TypedDict, typing.Generic[Tt]):
     """Data response from database lookup."""
  
     count:  int
-    result: typing.Iterator[T]
+    result: typing.Iterator[Tt]
+    status: "DataStatus"
 
+
+class DataStatus(enum.StrEnum):
+    OK         = enum.auto()
+    FOUND      = enum.auto()
+    FOUND_NONE = enum.auto()
+    CREATED    = enum.auto()
+    DELETED    = enum.auto()
+    
 
 class MinerModelV1(DeclarativeBase):
     """
@@ -60,16 +189,34 @@ class MinerModelV1(DeclarativeBase):
     procurement of Minecraft server resources.
     """
 
+    __abstract__ = True
+
+    @declared_attr
+    def __tablename__(self):
+        return "_".join(["mdb", self.__tablename__])
+
+
+class HasVersionOrders(MinerModelV1):
+    """
+    Model abstract that has version information.
+    """
+
+    __abstract__ = True
+
+    major: Mapped[int] = mapped_column(Integer(), default=0)
+    minor: Mapped[int] = mapped_column(Integer(), default=0)
+    patch: Mapped[int] = mapped_column(Integer(), default=0)
+
 
 class Alias(MinerModelV1):
     """
     Name used in place of retrieveable from host.
     """
 
-    __tablename__ = "mdb_aliases"
+    __tablename__ = "aliases"
 
     resource: Mapped[int] = mapped_column(
-        ForeignKey("mdb_resources.id"),
+        ForeignKey("resources.id"),
         primary_key=True)
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
 
@@ -86,7 +233,7 @@ class Alias(MinerModelV1):
 class Host(MinerModelV1):
     """Available hosts for aquiring resources."""
 
-    __tablename__ = "mdb_hosts"
+    __tablename__ = "hosts"
 
     name: Mapped[str] = mapped_column(primary_key=True)
     host: Mapped[str] = mapped_column(String(128))
@@ -105,13 +252,28 @@ class Host(MinerModelV1):
             dict(name=self.name, host=self.host))
 
 
+class MinecraftVersion(HasVersionOrders):
+    """
+    Available Minecraft version information.
+    """
+
+    __tablename__ = "mc_versions"
+
+    id: Mapped[int] = mapped_column(Integer(), primary_key=True)
+
+    # Relationships
+    versions: Mapped[list["Version"]] = relationship(
+        back_populates="mc_versions"
+    )
+
+
 class Resource(MinerModelV1):
     """
     Data Master for constructing a single
     resource.
     """
 
-    __tablename__ = "mdb_resources"
+    __tablename__ = "resources"
 
     id:   Mapped[int]     = mapped_column(primary_key=True)
     name: Mapped[str]     = mapped_column(String(64))
@@ -152,13 +314,13 @@ class Resource(MinerModelV1):
 class ResourceByHost(MinerModelV1):
     """Map resources to hosts."""
 
-    __tablename__ = "mdb_resource_by_host"
+    __tablename__ = "resource_by_host"
 
-    resource: Mapped[Resource] = mapped_column(
-        ForeignKey("mdb_resources.id"),
+    resource: Mapped[int] = mapped_column(
+        ForeignKey("resources.id"),
         primary_key=True)
-    host: Mapped[Host] = mapped_column(
-        ForeignKey("mdb_hosts.name"),
+    host: Mapped[str] = mapped_column(
+        ForeignKey("hosts.name"),
         primary_key=True)
 
     # Relationships
@@ -173,21 +335,21 @@ class ResourceByHost(MinerModelV1):
             dict(resource=self.resource, host=self.host))
 
 
-class Version(MinerModelV1):
+class Version(HasVersionOrders):
     """Version of some available resource."""
 
-    __tablename__ = "mdb_versions"
+    __tablename__ = "versions"
 
-    id:          Mapped[int]  = mapped_column(primary_key=True)
-    resource:    Mapped[int]  = mapped_column(ForeignKey("mdb_resources.id"))
-    major:       Mapped[int]  = mapped_column(Integer(), default=0)
-    minor:       Mapped[int]  = mapped_column(Integer(), default=0)
-    patch:       Mapped[str]  = mapped_column(String(16), nullable=True)
+    resource:    Mapped[int]  = mapped_column(ForeignKey("resources.id"), primary_key=True)
     build:       Mapped[str]  = mapped_column(String(16), nullable=True)
     is_snapshot: Mapped[bool] = mapped_column(Boolean(), default=False)
+    mc_version:  Mapped[int]  = mapped_column(ForeignKey("mc_versions.id"))
 
     # Relationships
-    resources: Mapped["Resource"] = relationship(back_populates="versions")
+    resources: Mapped["Resource"] = relationship(
+        back_populates="versions")
+    mc_versions: Mapped[MinecraftVersion] = relationship(
+        back_populates="versions")
 
     def __repr__(self):
         return resource_repr(
@@ -239,7 +401,7 @@ class MinerDB(typing.Protocol):
         commit: bool = ...) -> typing.ContextManager[Session]:
         """Database session."""
 
-    def update(self, model: T) -> Update[T]:
+    def update(self, model: Tt) -> Update[Tt]:
         """Initialize an update statement."""
 
     def __init__(self, *, debug: bool = ...) -> None:
@@ -280,8 +442,6 @@ class MinerDBSimple(MinerDB):
                 yield row
 
     def init(self):
-        if (pathlib.Path.cwd() / self._name).exists():
-            return
         self.root_model.metadata.create_all(self.engine)
 
     def select(self, *model):
@@ -321,7 +481,7 @@ class MinerDB_V1(MinerDBSimple):
         if name:
             stmt = stmt.where(Alias.name.contains(name))
 
-        return {"count": self.count(stmt), "result": self.find(stmt)}
+        return data_find(self.count(stmt), self.find(stmt))
 
     def find_hosts(
         self,
@@ -337,7 +497,19 @@ class MinerDB_V1(MinerDBSimple):
         if name:
             stmt = stmt.where(Host.name.contains(name))
 
-        return {"count": self.count(stmt), "result": self.find(stmt)}
+        return data_find(self.count(stmt), self.find(stmt))
+
+    def find_minecraft(self, version: typing.Optional[str] = None):
+        """
+        Query database for instances of
+        `MinecraftVersion`.
+        """
+
+        stmt = self.select(MinecraftVersion)
+        if version:
+            stmt = version_compare(stmt, MinecraftVersion, version)
+
+        return data_find(self.count(stmt), self.find(stmt))
 
     def find_resources(
         self,
@@ -348,34 +520,50 @@ class MinerDB_V1(MinerDBSimple):
         """
 
         stmt = self.select(Resource)
+        if resource:
+            stmt = stmt.where(Resource.id == resource)
 
-        return {"count": self.count(stmt), "result": self.find(stmt)}
+        return data_find(self.count(stmt), self.find(stmt))
 
-    def push_hosts_multi(self, *host: dict[str, str] | Host):
+    def find_versions(
+        self,
+        resource: int | None = None,
+        version: str | None = None,
+        build: str | None = None,
+        compatibility: str | None = None,
+        is_snapshot: bool | None = None) -> DataResponse[Version]:
         """
-        Creates new, or updates existing,
-        hosts.
+        Query database for instances of `Version`.
         """
 
-        host = tuple(Host(**h) if isinstance(h, dict) else h for h in host)
-        for h in host:
-            self.push_hosts_once(h)
+        stmt = self.select(Version)
+        if resource:
+            stmt = stmt.join(Resource, Resource.id == resource)
+        if version:
+            stmt = version_compare(stmt, Version, version)
+        if build:
+            stmt = stmt.where(Version.build == build)
+        if compatibility:
+            # Might not work without using join
+            # clause.
+            stmt = version_compare(stmt, MinecraftVersion, compatibility)
+        if is_snapshot is not None:
+            stmt = stmt.where(Version.is_snapshot == is_snapshot)
 
-    def push_hosts_once(self, host: dict[str, str] | Host):
+        return data_find(self.count(stmt), self.find(stmt))
+
+    def push_host(
+        self,
+        host: dict[str, str] | Host) -> DataResponse:
         """
         Creates a new, or updates an existing,
         host.
         """
 
-        host   = Host(**host) if isinstance(host, dict) else host
-        found  = self.find_hosts(host.name)
-        count  = found["count"]
-        result = found["result"]
+        host  = Host(**host) if isinstance(host, dict) else host
+        found = validate_pre_update(host, self.find_hosts, name=host.name)
+        count = found["count"]
 
-        if count > 1:
-            raise RecordExists(f"found too many records.")
-        if count > 0 and next(result) == host:
-            raise RecordExists(f"name exists.")
         if count == 1:
             stmt = (self.update(Host)
                 .values(host=host.host)
@@ -384,6 +572,33 @@ class MinerDB_V1(MinerDBSimple):
             stmt = (self.create(Host)
                 .values(host=host.host, name=host.name))
         self.push(stmt, commit=True)
+
+        return data_push(count)
+
+    def push_minecraft(
+        self,
+        version: dict[str, str] | MinecraftVersion) -> DataResponse:
+        """Create a new Minecraft metadata."""
+
+        version = (
+            MinecraftVersion(**version)
+            if isinstance(version, dict) else version)
+
+        # TODO: FIND check will not work properly
+        # without parameters.
+        found = validate_pre_update(
+            version,
+            self.find_minecraft)
+        count = found["count"]
+
+        if count == 1:
+            stmt = (self.update(MinecraftVersion)
+                .values(
+                    major=version.major,
+                    minor=version.minor,
+                    patch=version.patch)
+                .where()) # How do I get the next ID?
+        return data_push(count)
 
 
 if __name__ == "__main__":
