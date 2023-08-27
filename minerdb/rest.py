@@ -6,7 +6,7 @@ from fastapi import FastAPI, APIRouter
 from fastapi.exceptions import HTTPException
 from fastapi.types import DecoratedCallable
 
-from minerdb.data import MinerDB, MinerDB_V1
+from minerdb.data import MDt, Service, MinerDB_V1, ResourceKind
 from minerdb.error import MinerException
 
 Tt = typing.TypeVar("Tt")
@@ -164,9 +164,9 @@ class MinerAPINamespace(typing.TypedDict):
     Namespace values used in type initialization.
     """
 
-    __data_class__:   type[MinerDB]
+    __data_class__:   type[MDt]
     __rest_class__:   type[FastAPI]
-    __data__:         MinerDB
+    __data__:         MDt
     __debug_mode__:   bool
     __rest__:         FastAPI
     __route_prefix__: str
@@ -213,12 +213,12 @@ class MinerAPI_Meta(type(typing.Protocol)):
         return super().__new__(mcls, name, bases, namespace)
 
 
-class MinerAPI(typing.Protocol, metaclass=MinerAPI_Meta):
+class MinerAPI(typing.Protocol[MDt], metaclass=MinerAPI_Meta):
     """MinerDB API interface object."""
 
-    __data_class__:   type[MinerDB]
+    __data_class__:   type[MDt]
     __rest_class__:   type[FastAPI]
-    __data__:         MinerDB
+    __data__:         MDt
     __debug_mode__:   bool
     __rest__:         FastAPI
     __route_prefix__: str
@@ -226,7 +226,7 @@ class MinerAPI(typing.Protocol, metaclass=MinerAPI_Meta):
     __routes__:       typing.Sequence[str]
 
     @property
-    def data(self) -> MinerDB:
+    def data(self) -> MDt:
         """Database driver."""
 
         return self.__data__
@@ -324,7 +324,7 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
         version: str | None = None,
         build: str | None = None,
         compatibility: str | None = None,
-        is_snapshot: bool | None = None) :
+        is_snapshot: bool | None = None):
         """Returns all available versions."""
 
         return self.data.find_versions(
@@ -336,10 +336,7 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
 
     @restmethod("PUT", "/host", status_code=201)
     @minerdb_exc_handler
-    async def push_host(
-        self,
-        name: typing.Optional[str] = None,
-        host: typing.Optional[str] = None):
+    async def push_host(self, name: str, host: typing.Optional[str] = None):
         """
         Creates a new, or updates an existing,
         host.
@@ -349,11 +346,20 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
 
     @restmethod("PUT", "/minecraft", status_code=201)
     @minerdb_exc_handler
-    async def push_minecraft(
-        self,
-        version: typing.Optional[str] = None):
+    async def push_minecraft(self, version: str):
         """Creates a new Minecraft metadata."""
 
-        self.data.push_minecraft(dict(version=version))
+        return self.data.push_minecraft(dict(version=version))
+
+    @restmethod("PUT", "/resource", status_code=201)
+    @minerdb_exc_handler
+    async def push_resource(self, name: str, type: Service, kind: ResourceKind):
+        """
+        Creates a new, or updates an existing,
+        host.
+        """
+
+        return self.data.push_resource(dict(name=name, type=type, kind=kind))
+
 
 minerdb = MinerAPI_V1().rest

@@ -35,6 +35,7 @@ from minerdb.error import RecordExists, RecordNotFound
 
 Tt         = typing.TypeVar("Tt")
 Ps         = typing.ParamSpec("Ps")
+MDt        = typing.TypeVar("MDt", bound="MinerDB")
 MMt        = typing.TypeVar("MMt", bound="MinerModelV1")
 StmtT      = typing.TypeVar("StmtT", Select, Update, Insert, Delete)
 DRCallable = typing.Callable[Ps, "DataResponse[MMt]"]
@@ -129,9 +130,9 @@ def validate_pre_update(
     result = found["result"]
 
     if count > 1:
-        raise RecordExists(f"found too many records.")
+        raise RecordExists("Found too many records.")
     if count > 0 and next(result) == model:
-        raise RecordExists(f"record exists.")
+        raise RecordExists("Record exists.")
 
     return found
 
@@ -459,7 +460,7 @@ class MinerDBSimple(MinerDB):
         return update(model)
 
     def __init__(self, *, debug=False):
-        self._name       = "miner.db"
+        self._name       = "miner.sqlite"
         self._engine     = create_engine(f"sqlite:///{self._name}", echo=debug)
         self._root_model = MinerModelV1
 
@@ -513,7 +514,10 @@ class MinerDB_V1(MinerDBSimple):
 
     def find_resources(
         self,
-        resource: int | None = None) -> DataResponse[Resource]:
+        resource: int | None = None,
+        name: str | None = None,
+        type: Service | None = None,
+        kind: ResourceKind | None = None) -> DataResponse[Resource]:
         """
         Query database for instances of
         `Resource`.
@@ -522,6 +526,12 @@ class MinerDB_V1(MinerDBSimple):
         stmt = self.select(Resource)
         if resource:
             stmt = stmt.where(Resource.id == resource)
+        if name:
+            stmt = stmt.where(Resource.name == name)
+        if type:
+            stmt = stmt.where(Resource.type == type)
+        if kind:
+            stmt = stmt.where(Resource.kind == kind)
 
         return data_find(self.count(stmt), self.find(stmt))
 
@@ -552,52 +562,77 @@ class MinerDB_V1(MinerDBSimple):
 
         return data_find(self.count(stmt), self.find(stmt))
 
-    def push_host(
-        self,
-        host: dict[str, str] | Host) -> DataResponse:
+    def push_host(self, host: dict[str, str]) -> DataResponse:
         """
         Creates a new, or updates an existing,
         host.
         """
 
-        host  = Host(**host) if isinstance(host, dict) else host
-        found = validate_pre_update(host, self.find_hosts, name=host.name)
+        model = Host(**host)
+        found = validate_pre_update(model, self.find_hosts, **host)
         count = found["count"]
 
         if count == 1:
             stmt = (self.update(Host)
-                .values(host=host.host)
-                .where(Host.name == host.name))
+                .values(host=model.host)
+                .where(Host.name == model.name))
         else:
             stmt = (self.create(Host)
-                .values(host=host.host, name=host.name))
+                .values(host=model.host, name=model.name))
         self.push(stmt, commit=True)
 
         return data_push(count)
 
-    def push_minecraft(
-        self,
-        version: dict[str, str] | MinecraftVersion) -> DataResponse:
+    def push_minecraft(self, version: dict[str, str]) -> DataResponse:
         """Create a new Minecraft metadata."""
 
-        version = (
-            MinecraftVersion(**version)
-            if isinstance(version, dict) else version)
+        maj, min, pat = version_parse_str(version["version"])
+        model = MinecraftVersion(major=maj, minor=min, patch=pat)
 
-        # TODO: FIND check will not work properly
-        # without parameters.
         found = validate_pre_update(
             version,
-            self.find_minecraft)
+            self.find_minecraft,
+            version["version"])
         count = found["count"]
 
         if count == 1:
-            stmt = (self.update(MinecraftVersion)
+            # Precheck only validates for if an
+            # existing record matches this one.
+            raise RecordExists("Record exists.")
+        else:
+            stmt = (self.create(MinecraftVersion)
                 .values(
-                    major=version.major,
-                    minor=version.minor,
-                    patch=version.patch)
-                .where()) # How do I get the next ID?
+                    major=model.major,
+                    minor=model.minor,
+                    patch=model.patch))
+        self.push(stmt, commit=True)
+
+        return data_push(count)
+
+    def push_resource(self, resource: dict[str, str]) -> DataResponse:
+        """
+        Creates a new, or updates an existing,
+        resource.
+        """
+
+        model = Resource(**resource)
+        found = validate_pre_update(model, self.find_resources, **resource)
+        count = found["count"]
+
+        if count == 1:
+            stmt = (self.update(Resource)
+                .values(
+                    type=model.type,
+                    kind=model.kind)
+                .where(Resource.name == model.name))
+        else:
+            stmt = (self.create(Resource)
+                .values(
+                    name=model.name,
+                    type=model.type,
+                    kind=model.kind))
+        self.push(stmt, commit=True)
+
         return data_push(count)
 
 
