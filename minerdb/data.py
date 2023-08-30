@@ -22,7 +22,10 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
-    String)
+    Sequence,
+    String,
+    Table,
+    TypeDecorator)
 from sqlalchemy.orm import (
     declared_attr,
     mapped_column,
@@ -48,20 +51,30 @@ OperationMap = {
     "<":  "__lt__"
 }
 
+def data_drop(count: typing.Optional[int] = None) -> "DataResponse":
+    """Create a data response for DROP call."""
+
+    dr = data_new(count, status=DataStatus.DROPPED)
+    dr.pop("result")
+    return dr
+
 def data_find(
     count: typing.Optional[int] = None,
     result: typing.Optional[typing.Iterable] = None) -> "DataResponse":
     """Create a data response for a FIND call."""
 
     status = DataStatus.FOUND if count else DataStatus.FOUND_NONE
-    return data_new(count, result, status)
+    dr     = data_new(count, result, status)
+    return dr
 
 
 def data_push(count: typing.Optional[int] = None) -> "DataResponse":
     """Create a data response for a PUSH call."""
 
     status = DataStatus.UPDATED if count else DataStatus.CREATED
-    return data_new(count, status=status)
+    dr     = data_new(count, status=status)
+    dr.pop("result")
+    return dr
 
 
 def data_new(
@@ -127,11 +140,11 @@ def validate_pre_update(
 
     found  = func(**kwds)
     count  = found["count"]
-    result = found["result"]
 
+    found["result"] = tuple(found["result"])
     if count > 1:
         raise RecordExists("Found too many records.")
-    if count > 0 and next(result) == model:
+    if count > 0 and found["result"][0] == model:
         raise RecordExists("Record exists.")
 
     return found
@@ -181,8 +194,9 @@ class DataStatus(enum.StrEnum):
     FOUND      = enum.auto()
     FOUND_NONE = enum.auto()
     CREATED    = enum.auto()
-    DELETED    = enum.auto()
-    
+    DROPPED    = enum.auto()
+    UPDATED    = enum.auto()
+
 
 class MinerModelV1(DeclarativeBase):
     """
@@ -216,6 +230,7 @@ class Alias(MinerModelV1):
 
     __tablename__ = "aliases"
 
+    id: Mapped[int] = mapped_column(Integer(), primary_key=True)
     resource: Mapped[int] = mapped_column(
         ForeignKey("resources.id"),
         primary_key=True)
@@ -236,7 +251,8 @@ class Host(MinerModelV1):
 
     __tablename__ = "hosts"
 
-    name: Mapped[str] = mapped_column(primary_key=True)
+    id:   Mapped[int] = mapped_column(Integer(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
     host: Mapped[str] = mapped_column(String(128))
 
     # Relationships
@@ -276,8 +292,8 @@ class Resource(MinerModelV1):
 
     __tablename__ = "resources"
 
-    id:   Mapped[int]        = mapped_column(primary_key=True)
-    name: Mapped[str]        = mapped_column(String(64))
+    id:   Mapped[int] = mapped_column(Integer(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
     type: Mapped[ServiceAPI] = mapped_column(
         Enum(ServiceAPI),
         default=ServiceAPI.Paper)
@@ -317,11 +333,12 @@ class ResourceByHost(MinerModelV1):
 
     __tablename__ = "resource_by_host"
 
+    id: Mapped[int] = mapped_column(Integer(), primary_key=True)
     resource: Mapped[int] = mapped_column(
         ForeignKey("resources.id"),
         primary_key=True)
-    host: Mapped[str] = mapped_column(
-        ForeignKey("hosts.name"),
+    host: Mapped[int] = mapped_column(
+        ForeignKey("hosts.id"),
         primary_key=True)
 
     # Relationships
@@ -341,6 +358,7 @@ class Version(HasVersionOrders):
 
     __tablename__ = "versions"
 
+    id:          Mapped[int]  = mapped_column(Integer(), primary_key=True)
     resource:    Mapped[int]  = mapped_column(ForeignKey("resources.id"), primary_key=True)
     build:       Mapped[str]  = mapped_column(String(16), nullable=True)
     is_snapshot: Mapped[bool] = mapped_column(Boolean(), default=False)
@@ -378,6 +396,9 @@ class MinerDB(typing.Protocol):
         statement.
         """
 
+    def delete(self, model: MinerModelV1) -> Delete[MinerModelV1]:
+        """Initializd a delete statement."""
+
     def push(self, *inst: MinerModelV1, commit: bool = ...):
         """
         Performs some action against the database.
@@ -386,7 +407,9 @@ class MinerDB(typing.Protocol):
     def find(
         self,
         statement: Select[tuple[MinerModelV1]]) -> typing.Iterator[MinerModelV1]:
-        """Executes a statement."""
+        """
+        Executes a statement returning the result.
+        """
 
     def init(self) -> None:
         """Initialize MirrirDB."""
@@ -426,12 +449,23 @@ class MinerDBSimple(MinerDB):
         return insert(model)
 
     def count(self, statement):
+        # We have to filter out the joins in
+        # the passed statement in order for
+        # our count query to work.
+        # Otherwise, SQLAlchemy renders the
+        # JOINs multiple times leaving column
+        # names ambiguous to the DB driver.
+        froms = [f for f in statement.froms if isinstance(f, Table)]
+        count = (statement
+            .with_only_columns(func.count())
+            .select_from(*froms)
+            .order_by(None))
+
         with self.session() as sxn:
-            counter = (statement
-                .with_only_columns(func.count())
-                .select_from(*statement.froms)
-                .order_by(None))
-            return sxn.execute(counter).scalar()
+            return sxn.execute(count).scalar()
+
+    def delete(self, model):
+        return delete(model)
 
     def push(self, statement, commit=False):
         with self.session(commit=commit) as sxn:
@@ -468,8 +502,61 @@ class MinerDBSimple(MinerDB):
 class MinerDB_V1(MinerDBSimple):
     """MinerDB version: 1"""
 
+    def drop_alias(self, id: int) -> DataResponse:
+        """
+        Attempt to delete an instance of `Alias`.
+        """
+
+        self.push(
+            self.delete(Alias).where(Alias.id == id),
+            commit=True)
+        return data_drop(1)
+
+    def drop_host(self, id: int) -> DataResponse:
+        """
+        Attempt to delete an instance of `Host`.
+        """
+
+        self.push(
+            self.delete(Host).where(Host.id == id),
+            commit=True)
+        return data_drop(1)
+
+    def drop_minecraft(self, id: int) -> DataResponse:
+        """
+        Attempt to delete an instance of
+        `MinecraftVersion`.
+        """
+
+        self.push(
+            self.delete(MinecraftVersion).where(MinecraftVersion.id == id),
+            commit=True)
+        return data_drop(1)
+
+    def drop_resource(self, id: int) -> DataResponse:
+        """
+        Attempt to delete an instance of
+        `Resource`.
+        """
+
+        self.push(
+            self.delete(Resource).where(Resource.id == id),
+            commit=True)
+        return data_drop(1)
+
+    def drop_version(self, id: int) -> DataResponse:
+        """
+        Attempt to delete an instance of
+        `Version`.
+        """
+
+        self.push(
+            self.delete(Version).where(Version.id == id),
+            commit=True)
+
     def find_aliases(
         self,
+        id: int | None = None,
         name: str | None = None,
         resource: int | None = None) -> DataResponse[Alias]:
         """
@@ -477,15 +564,20 @@ class MinerDB_V1(MinerDBSimple):
         """
 
         stmt = self.select(Alias)
-        if resource:
-            stmt = stmt.join(Resource, Resource.id == resource)
-        if name:
+        if id is not None:
+            stmt = stmt.where(Alias.id == id)
+        if resource is not None:
+            stmt = (stmt
+                .join(Resource, Alias.resource == Resource.id)
+                .where(Alias.resource == resource))
+        if name is not None:
             stmt = stmt.where(Alias.name.contains(name))
 
         return data_find(self.count(stmt), self.find(stmt))
 
     def find_hosts(
         self,
+        id: int | None = None,
         name: str | None = None,
         resource: int | None = None) -> DataResponse[Host]:
         """
@@ -493,28 +585,37 @@ class MinerDB_V1(MinerDBSimple):
         """
 
         stmt = self.select(Host)
-        if resource:
-            stmt = stmt.join(ResourceByHost, Resource.id == resource)
-        if name:
+        if id is not None:
+            stmt = stmt.where(Host.id == id)
+        if resource is not None:
+            stmt = (stmt
+                .join(ResourceByHost, Host.id == ResourceByHost.host)
+                .where(ResourceByHost.resource == resource))
+        if name is not None:
             stmt = stmt.where(Host.name.contains(name))
 
         return data_find(self.count(stmt), self.find(stmt))
 
-    def find_minecraft(self, version: typing.Optional[str] = None):
+    def find_minecraft(
+        self,
+        id: int | None = None,
+        version: typing.Optional[str] = None):
         """
         Query database for instances of
         `MinecraftVersion`.
         """
 
         stmt = self.select(MinecraftVersion)
-        if version:
+        if id is not None:
+            stmt = stmt.where(MinecraftVersion.id == id)
+        if version is not None:
             stmt = version_compare(stmt, MinecraftVersion, version)
 
         return data_find(self.count(stmt), self.find(stmt))
 
     def find_resources(
         self,
-        resource: int | None = None,
+        id: int | None = None,
         name: str | None = None,
         type: ServiceAPI | None = None,
         kind: ResourceKind | None = None) -> DataResponse[Resource]:
@@ -524,19 +625,20 @@ class MinerDB_V1(MinerDBSimple):
         """
 
         stmt = self.select(Resource)
-        if resource:
-            stmt = stmt.where(Resource.id == resource)
-        if name:
-            stmt = stmt.where(Resource.name == name)
-        if type:
+        if id is not None:
+            stmt = stmt.where(Resource.id == id)
+        if name is not None:
+            stmt = stmt.where(Resource.name.contains(name))
+        if type is not None:
             stmt = stmt.where(Resource.type == type)
-        if kind:
+        if kind is not None:
             stmt = stmt.where(Resource.kind == kind)
 
         return data_find(self.count(stmt), self.find(stmt))
 
     def find_versions(
         self,
+        id: int | None = None,
         resource: int | None = None,
         version: str | None = None,
         build: str | None = None,
@@ -547,13 +649,17 @@ class MinerDB_V1(MinerDBSimple):
         """
 
         stmt = self.select(Version)
-        if resource:
-            stmt = stmt.join(Resource, Resource.id == resource)
-        if version:
+        if id is not None:
+            stmt = stmt.where(Version.id == id)
+        if resource is not None:
+            stmt = (stmt
+                .join(Resource, Resource.id == Version.resource)
+                .where(Resource.id == resource))
+        if version is not None:
             stmt = version_compare(stmt, Version, version)
-        if build:
+        if build is not None:
             stmt = stmt.where(Version.build == build)
-        if compatibility:
+        if compatibility is not None:
             # Might not work without using join
             # clause.
             stmt = version_compare(stmt, MinecraftVersion, compatibility)
@@ -561,6 +667,22 @@ class MinerDB_V1(MinerDBSimple):
             stmt = stmt.where(Version.is_snapshot == is_snapshot)
 
         return data_find(self.count(stmt), self.find(stmt))
+
+    def make_alias(self, meta: dict[str, str]) -> DataResponse:
+        """Create a new alias entry."""
+
+        model, count = self.prevalidate_alias(meta)
+        if count == 1:
+            raise RecordExists("Alias exists.")
+
+        self.push(
+            self.create(Alias)
+                .values(
+                    resource=model.resource,
+                    name=model.name),
+            commit=True)
+
+        return data_push(count)
 
     def make_host(self, meta: dict[str, str]) -> DataResponse:
         """Create a new host entry."""
@@ -610,6 +732,33 @@ class MinerDB_V1(MinerDBSimple):
 
         return data_push(count)
 
+    def prevalidate_alias(self, meta: dict[str, str]) -> tuple[Alias, int]:
+        """
+        Validate a alias entry before it can be
+        modified or created. Raises a
+        `MinerException` if invalid, returns a
+        query model and the result count
+        otherwise.
+        """
+
+        owner_count = self.find_resources(meta["resource"])["count"]
+        if owner_count > 1:
+            raise RecordExists("Found too many resources.")
+        if owner_count < 1:
+            raise RecordNotFound("No resource exists.")
+
+        model = Alias(**meta)
+        found = validate_pre_update(
+            model,
+            self.find_aliases,
+            resource=meta["resource"],
+            name=meta.get("name", None))
+        count = found["count"]
+
+        if count > 0:
+            model.id = found["result"][0].id
+        return model, found["count"]
+
     def prevalidate_host(self, meta: dict[str, str]) -> tuple[Host, int]:
         """
         Validate a host entry before it can be
@@ -620,9 +769,18 @@ class MinerDB_V1(MinerDBSimple):
         """
 
         model = Host(**meta)
-        found = validate_pre_update(model, self.find_hosts, **meta)
+        found = validate_pre_update(
+            model,
+            self.find_hosts,
+            id=meta.get("id", None),
+            name=meta.get("name", None),
+            resource=meta.get("resource", None))
+        count = found["count"]
+
+        if count > 0:
+            model.id = found["result"][0].id
         return model, found["count"]
-    
+
     def prevalidate_minecraft(
         self,
         meta: dict[str, str]) -> tuple[MinecraftVersion, int]:
@@ -634,11 +792,18 @@ class MinerDB_V1(MinerDBSimple):
         otherwise.
         """ 
 
-        found = validate_pre_update(meta, self.find_minecraft, meta["version"])
+        maj, min, pat = version_parse_str(meta["version"])
+        model = MinecraftVersion(major=maj, minor=min, patch=pat)
+        found = validate_pre_update(
+            model,
+            self.find_minecraft,
+            id=meta.get("id", None),
+            version=meta.get("version", None))
         count = found["count"]
 
-        maj, min, pat = version_parse_str(meta["version"])
-        return MinecraftVersion(major=maj, minor=min, patch=pat), count
+        if count > 0:
+            model.id = found["result"][0].id
+        return model, found["count"]
 
     def prevalidate_resource(
         self,
@@ -652,23 +817,41 @@ class MinerDB_V1(MinerDBSimple):
         """
 
         model = Resource(**meta)
-        found = validate_pre_update(model, self.find_resources, **meta)
+        found = validate_pre_update(
+            model,
+            self.find_resources,
+            id=meta.get("id", None),
+            name=meta.get("name", None))
+        count = found["count"]
+
+        if count > 0:
+            model.id = found["result"][0].id
         return model, found["count"]
 
+    def push_alias(self, meta: dict[str, str]) -> DataResponse:
+        """Update an existing alias entry."""
 
-    def push_host(self, host: dict[str, str]) -> DataResponse:
-        """
-        Update an existing host entry.
-        """
+        model, count = self.prevalidate_alias(meta)
+        if count < 1:
+            raise RecordNotFound("Alias not found.")
 
-        model, count = self.prevalidate_host(host)
+        self.push(
+            self.update(Alias).values(name=model.name).where(id=model.id),
+            commit=True)
+
+        return data_push(count)
+
+    def push_host(self, meta: dict[str, str]) -> DataResponse:
+        """Update an existing host entry."""
+
+        model, count = self.prevalidate_host(meta)
         if count < 1:
             raise RecordNotFound("Host not found.")
 
         self.push(
             self.update(Host)
                 .values(host=model.host)
-                .where(Host.name == model.name),
+                .where(Host.id == model.id),
             commit=True)
         
         return data_push(count)
@@ -685,7 +868,7 @@ class MinerDB_V1(MinerDBSimple):
                 .values(
                     type=model.type,
                     kind=model.kind)
-                .where(Resource.name == model.name),
+                .where(Resource.id == model.id),
             commit=True)
 
         return data_push(count)
@@ -694,4 +877,4 @@ class MinerDB_V1(MinerDBSimple):
 if __name__ == "__main__":
     minerdb = MinerDB_V1(debug=True)
     minerdb.init()
-    cnt, aliases = minerdb.aliases()
+    cnt, aliases = minerdb.find_aliases()

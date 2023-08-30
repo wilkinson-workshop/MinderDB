@@ -24,7 +24,7 @@ class RecordNotFound(MinerException):
     """
 
     def __init__(self, *args, **kwds):
-        self.status_code = 401
+        self.status_code = 404
         super().__init__(*args, **kwds)
 
 

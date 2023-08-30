@@ -279,7 +279,43 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
     if typing.TYPE_CHECKING:
         data: MinerDB_V1
 
+    @restmethod("DELETE", "/alias/{id}")
+    @minerdb_exc_handler
+    async def drop_aliases(self, id: int):
+        """Delete an alias."""
+
+        return self.data.drop_alias(id)
+
+    @restmethod("DELETE", "/host/{id}")
+    @minerdb_exc_handler
+    async def drop_host(self, id: int):
+        """Delete a host."""
+
+        return self.data.drop_host(id)
+
+    @restmethod("DELETE", "/minecraft/{id}")
+    @minerdb_exc_handler
+    async def drop_minecraft(self, id: int):
+        """Delete a minecraft entry."""
+
+        return self.data.drop_minecraft(id)
+
+    @restmethod("DELETE", "/resource/{id}")
+    @minerdb_exc_handler
+    async def drop_resource(self, id: int):
+        """Delete a resource."""
+
+        return self.data.drop_resource(id)
+
+    @restmethod("DELETE", "/version/{id}")
+    @minerdb_exc_handler
+    async def drop_version(self, id: int):
+        """Delete a version."""
+
+        return self.data.drop_version(id)
+
     @restmethod("GET", "/")
+    @minerdb_exc_handler
     async def read_root(self):
         """Root of MinerDB API v1."""
 
@@ -322,6 +358,54 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
 
         return self.data.find_resources(id, name, type, kind)
 
+    @restmethod("GET", "/resource/{id}/alias")
+    @minerdb_exc_handler
+    async def read_resource_aliases(
+        self,
+        id: int,
+        name: typing.Optional[str] = None):
+        """
+        Returns all available aliases related to
+        a resource.
+        """
+
+        return self.data.find_aliases(resource=id, name=name)
+
+    @restmethod("GET", "/resource/{id}/host")
+    @minerdb_exc_handler
+    async def read_resource_hosts(
+        self,
+        id: int,
+        name: typing.Optional[str] = None):
+        """
+        Returns all available aliases related to
+        a resource.
+        """
+
+        return self.data.find_hosts(resource=id, name=name)
+
+    @restmethod("/resource/{id}/version")
+    @minerdb_exc_handler
+    async def read_resource_versions(
+        self,
+        id: int,
+        version: typing.Optional[str] = None,
+        build: typing.Optional[str] = None,
+        compatibility: typing.Optional[str] = None,
+        is_snapshot: typing.Optional[bool] = None):
+        """
+        Returns all available versions related to
+        a resource.
+        """
+
+        return self.data.find_versions(
+            None,
+            id,
+            version,
+            build,
+            compatibility,
+            is_snapshot)
+
     @restmethod("GET", "/version")
     @minerdb_exc_handler
     async def read_versions(
@@ -334,38 +418,63 @@ class MinerAPI_V1(MinerAPI, prefix="/v1", debug=True):
         """Returns all available versions."""
 
         return self.data.find_versions(
+            None,
             resource,
             version,
             build,
             compatibility,
             is_snapshot)
 
-    @restmethod("PATCH", "/host", status_code=201)
+    @restmethod("POST", "/alias", status_code=201)
     @minerdb_exc_handler
-    async def push_host(self, name: str, host: typing.Optional[str] = None):
-        """
-        Creates a new, or updates an existing,
-        host.
-        """
+    async def push_alias(self, resource: int, name: str):
+        """Create a new alias entry."""
 
-        return self.data.push_host(dict(name=name, host=host))
+        return self.data.make_alias(dict(name=name, resource=resource))
+
+    @restmethod("POST", "/host", status_code=201)
+    @minerdb_exc_handler
+    async def push_host(self, name: str, host: str):
+        """Create a new host entry."""
+
+        return self.data.make_host(dict(name=name, host=host))
 
     @restmethod("POST", "/minecraft", status_code=201)
     @minerdb_exc_handler
     async def push_minecraft(self, version: str):
-        """Creates a new Minecraft metadata."""
+        """Create a new Minecraft metadata."""
 
         return self.data.make_minecraft(dict(version=version))
 
-    @restmethod("PATCH", "/resource", status_code=201)
+    @restmethod("POST", "/resource", status_code=201)
     @minerdb_exc_handler
     async def push_resource(
         self,
         name: str,
-        type: ServiceAPI, kind: ResourceKind):
+        type: ServiceAPI,
+        kind: ResourceKind):
+        """Create a new resource entry."""
+
+        return self.data.make_resource(dict(name=name, type=type, kind=kind))
+
+    @restmethod("PATCH", "/host")
+    @minerdb_exc_handler
+    async def write_host(self, name: str, host: str):
         """
-        Creates a new, or updates an existing,
-        host.
+        Update an existing host entry.
+        """
+
+        return self.data.push_host(dict(name=name, host=host))
+
+    @restmethod("PATCH", "/resource")
+    @minerdb_exc_handler
+    async def write_resource(
+        self,
+        name: str,
+        type: ServiceAPI,
+        kind: ResourceKind):
+        """
+        Update an existing resource.
         """
 
         return self.data.push_resource(dict(name=name, type=type, kind=kind))
